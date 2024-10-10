@@ -1,0 +1,9 @@
+python-dotenv==1.0.1
+google-cloud-storage==2.18.2
+langchain==0.3.3
+langchain-community==0.3.2
+langchain-chroma==0.1.4
+fastembed==0.3.6
+chromadb==0.5.12
+openai==1.51.2
+Flask==3.0.3
