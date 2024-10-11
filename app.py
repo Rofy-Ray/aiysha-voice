@@ -8,6 +8,7 @@ from functools import lru_cache
 from google.cloud import storage
 from langchain_chroma import Chroma
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from google.auth import default, transport
 from langchain_community.embeddings import FastEmbedEmbeddings
 
@@ -17,6 +18,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+CORS(app)
 
 ASR_ENDPOINT = os.getenv("ASR_ENDPOINT")
 TTS_ENDPOINT = os.getenv("TTS_ENDPOINT")
@@ -206,7 +208,11 @@ def process_audio():
         else:
             context = "Vector store is not available."
         
-        llm_response = get_text_response(transcribed_text, context)
+        try:
+            llm_response = get_text_response(transcribed_text, context)
+        except Exception as e:
+            logger.error(f"Error getting LLM response: {str(e)}")
+            return jsonify({"error": "No response from LLM"}), 500
         
         audio_url = text_to_speech(llm_response)
         if not audio_url:
@@ -218,5 +224,5 @@ def process_audio():
         logger.error(f"Unexpected error in process_audio: {str(e)}")
         return jsonify({"error": "An unexpected error occurred"}), 500
 
-if __name__ == '__main__':
-    app.run(debug=True)
+# if __name__ == "__main__":
+#     app.run(debug=True, host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
