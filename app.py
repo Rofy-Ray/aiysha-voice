@@ -1,8 +1,12 @@
-import logging
 import os
 import time
+import json
+import uuid
 import openai
+import logging
 import requests
+from pydub import AudioSegment
+from tempfile import NamedTemporaryFile
 from dotenv import load_dotenv
 from functools import lru_cache
 from google.cloud import storage
@@ -25,6 +29,7 @@ TTS_ENDPOINT = os.getenv("TTS_ENDPOINT")
 MAAS_ENDPOINT = os.getenv("MAAS_ENDPOINT")
 PROJECT_NUMBER = os.getenv("PROJECT_NUMBER")
 BUCKET_NAME = os.getenv("BUCKET_NAME")
+CONVERSATION_TRACK_BLOB = os.getenv("CONVERSATION_TRACK_BLOB")
 
 CHROMA_PATH = "database/"
 DB_DIR = "chroma_db"
@@ -53,7 +58,7 @@ def release_lock():
 def get_embedding_function():
     try:
         logger.debug("Initializing FastEmbedEmbeddings")
-        embedding_function = FastEmbedEmbeddings(model_name="BAAI/bge-small-en-v1.5")
+        embedding_function = FastEmbedEmbeddings(model_name="BAAI/bge-large-en-v1.5")
         logger.debug("FastEmbedEmbeddings initialized")
         
         logger.debug("Testing embed_query")
@@ -120,27 +125,99 @@ def query_vector_store(query: str, db, k: int = 3):
 
 vector_store = get_vector_store()
 
-def transcribe_audio(audio_file):
+def generate_conversation_id():
+    """Generate a unique conversation ID."""
+    return str(uuid.uuid4())
+
+def save_chat_history(conversation_id: str, messages: list):
+    """Save chat history to GCS using conversation ID."""
     try:
-        files = {'file': ('audio.wav', audio_file, 'audio/wav')}
-        response = requests.post(ASR_ENDPOINT, files=files)
-        response.raise_for_status()
-        result = response.json()
-        return result['text']
+        blob = bucket.blob(f"history/chats/{conversation_id}.json")
+        blob.upload_from_string(json.dumps(messages))
+        logger.info(f"Chat history saved for conversation ID: {conversation_id}")
+    except Exception as e:
+        logger.error(f"Error saving chat history: {str(e)}")
+        raise
+
+def load_chat_history(conversation_id: str) -> list:
+    """Load chat history from GCS using conversation ID."""
+    try:
+        blob = bucket.blob(f"history/chats/{conversation_id}.json")
+        if blob.exists():
+            return json.loads(blob.download_as_string())
+        return []
+    except Exception as e:
+        logger.error(f"Error loading chat history: {str(e)}")
+        return []
+    
+def update_conversation_count():
+    """Update conversation count in GCS."""
+    blob = bucket.blob(CONVERSATION_TRACK_BLOB)
+    
+    try:
+        if not blob.exists():
+            blob.upload_from_string("queries: 0\nresponses: 0")
+            
+        content = blob.download_as_text()
+        lines = content.split('\n')
+        
+        queries = int(lines[0].split(': ')[1])
+        responses = int(lines[1].split(': ')[1])
+        
+        queries += 1
+        responses += 1
+        
+        new_content = f"queries: {queries}\nresponses: {responses}"
+        blob.upload_from_string(new_content)
+        logger.info("Conversation count updated successfully")
+    except Exception as e:
+        logger.error(f"Error updating conversation count: {str(e)}")
+        
+def preprocess_audio(file):
+    """Convert audio to mono if needed and return temporary file path."""
+    try:
+        with NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
+            sound = AudioSegment.from_file(file)
+            if sound.channels != 1:
+                sound = sound.set_channels(1)
+            sound.export(temp_file.name, format="wav")
+            return temp_file.name
+    except Exception as e:
+        logger.error(f"Error preprocessing audio: {str(e)}")
+        raise
+    
+def transcribe_audio(audio_path):
+    """Transcribe audio file to text."""
+    try:
+        with open(audio_path, 'rb') as audio_file:
+            files = {'file': ('audio.wav', audio_file, 'audio/wav')}
+            response = requests.post(ASR_ENDPOINT, files=files)
+            response.raise_for_status()
+            result = response.json()
+            return result['text']
     except requests.RequestException as e:
         logger.error(f"Error in ASR request: {str(e)}")
-        return None
+        raise
+    finally:
+        try:
+            os.unlink(audio_path)
+        except Exception as e:
+            logger.error(f"Error removing temporary file: {str(e)}")
 
 def text_to_speech(text):
+    """Convert text to speech and return both text and audio URL."""
     try:
         payload = {"text": text}
         response = requests.post(TTS_ENDPOINT, json=payload)
         response.raise_for_status()
         result = response.json()
-        return result['audio_url']
+        return {
+            "text": result['text'],
+            "audio_url": result['audio_url']
+        }
     except requests.RequestException as e:
         logger.error(f"Error in TTS request: {str(e)}")
-        return None
+        raise
 
 def get_openai_client():
     credentials, _ = default()
@@ -151,7 +228,7 @@ def get_openai_client():
         api_key=credentials.token
     )
 
-def get_text_response(message: str, context: str):
+def get_text_response(message: str, context: str, chat_history: list):
     client = get_openai_client()
     
     system_message = """
@@ -160,10 +237,9 @@ def get_text_response(message: str, context: str):
     Please respond with complete sentences and keep your responses under 280 characters.
     """
     
-    messages = [
-        {"role": "system", "content": system_message},
-        {"role": "user", "content": f"Context: {context}\n\nQuestion: {message}"}
-    ]
+    messages = [{"role": "system", "content": system_message}]
+    messages.extend(chat_history)
+    messages.append({"role": "user", "content": f"Context: {context}\n\nQuestion: {message}"})
     
     try:
         response = client.chat.completions.create(
@@ -184,7 +260,7 @@ def get_text_response(message: str, context: str):
         logger.error(f"Error in text response generation: {str(e)}")
         return "I apologize, but I encountered an error while processing your request. Please try again."
 
-@app.route('/aiyshaspeech', methods=['POST'])
+@app.route('/aiyshavoice', methods=['POST'])
 def process_audio():
     try:
         if 'file' not in request.files:
@@ -195,33 +271,54 @@ def process_audio():
         if file.filename == '':
             return jsonify({"error": "No selected file"}), 400
         
-        transcribed_text = transcribe_audio(file)
+        conversation_id = request.form.get('conversation_id')
+        is_new_conversation = False
+        
+        if not conversation_id:
+            conversation_id = generate_conversation_id()
+            is_new_conversation = True
+            logger.info(f"New conversation started with ID: {conversation_id}")
+        
+        processed_audio_path = preprocess_audio(file)
+        transcribed_text = transcribe_audio(processed_audio_path)
+        
         if not transcribed_text:
             return jsonify({"error": "Failed to transcribe audio"}), 500
         
+        context = ""
         if vector_store is not None:
             try:
                 context = query_vector_store(transcribed_text, vector_store)
             except Exception as e:
                 logger.error(f"Error querying vector store: {str(e)}")
                 context = "Unable to retrieve context."
-        else:
-            context = "Vector store is not available."
+        
+        chat_history = load_chat_history(conversation_id) if not is_new_conversation else []
         
         try:
-            llm_response = get_text_response(transcribed_text, context)
+            llm_response = get_text_response(transcribed_text, context, chat_history)
         except Exception as e:
             logger.error(f"Error getting LLM response: {str(e)}")
             return jsonify({"error": "No response from LLM"}), 500
         
-        audio_url = text_to_speech(llm_response)
-        if not audio_url:
-            return jsonify({"error": "Failed to convert text to speech"}), 500
+        tts_result = text_to_speech(llm_response)
         
-        return jsonify({"audio_url": audio_url})
+        chat_history.extend([
+            {"role": "user", "content": transcribed_text},
+            {"role": "assistant", "content": llm_response}
+        ])
+        save_chat_history(conversation_id, chat_history)
+        
+        update_conversation_count()
+        
+        return jsonify({
+            "conversation_id": conversation_id,
+            "text": tts_result["text"],
+            "audio_url": tts_result["audio_url"]
+        })
     
     except Exception as e:
-        logger.error(f"Unexpected error in process_audio: {str(e)}")
+        logger.error(f"Unexpected error in processing audio: {str(e)}")
         return jsonify({"error": "An unexpected error occurred"}), 500
 
 # if __name__ == "__main__":
