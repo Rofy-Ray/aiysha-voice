@@ -133,7 +133,7 @@ def save_chat_history(conversation_id: str, messages: list):
     """Save chat history to GCS using conversation ID."""
     try:
         blob = bucket.blob(f"history/chats/{conversation_id}.json")
-        blob.upload_from_string(json.dumps(messages))
+        blob.upload_from_string(json.dumps(messages, indent=4))
         logger.info(f"Chat history saved for conversation ID: {conversation_id}")
     except Exception as e:
         logger.error(f"Error saving chat history: {str(e)}")
@@ -203,6 +203,12 @@ def transcribe_audio(audio_path):
             os.unlink(audio_path)
         except Exception as e:
             logger.error(f"Error removing temporary file: {str(e)}")
+            
+def upload_audio_to_gcs(audio_bytes):
+    file_name = f"uploads/audio/{uuid.uuid4()}.wav"
+    blob = bucket.blob(file_name)
+    blob.upload_from_string(audio_bytes, content_type='audio/wav')
+    return blob.public_url
 
 def text_to_speech(text):
     """Convert text to speech and return both text and audio URL."""
@@ -280,6 +286,11 @@ def process_audio():
             logger.info(f"New conversation started with ID: {conversation_id}")
         
         processed_audio_path = preprocess_audio(file)
+        
+        with open(processed_audio_path, 'rb') as audio_file:
+            audio_bytes = audio_file.read()
+        user_audio_url = upload_audio_to_gcs(audio_bytes)
+        
         transcribed_text = transcribe_audio(processed_audio_path)
         
         if not transcribed_text:
@@ -304,9 +315,10 @@ def process_audio():
         tts_result = text_to_speech(llm_response)
         
         chat_history.extend([
-            {"role": "user", "content": transcribed_text},
-            {"role": "assistant", "content": llm_response}
+            {"role": "user", "content": transcribed_text, "audio": user_audio_url, "image": None},
+            {"role": "assistant", "content": llm_response, "audio": tts_result["audio_url"] if tts_result["audio_url"] else None, "image": None}
         ])
+        
         save_chat_history(conversation_id, chat_history)
         
         update_conversation_count()
