@@ -218,7 +218,6 @@ def text_to_speech(text):
         response.raise_for_status()
         result = response.json()
         return {
-            "text": result['text'],
             "audio_url": result['audio_url']
         }
     except requests.RequestException as e:
@@ -325,7 +324,7 @@ def process_audio():
         
         return jsonify({
             "conversation_id": conversation_id,
-            "text": tts_result["text"],
+            "text": llm_response,
             "audio_url": tts_result["audio_url"]
         })
     
