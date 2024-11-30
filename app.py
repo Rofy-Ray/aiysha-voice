@@ -235,7 +235,7 @@ def get_openai_client():
 
 def get_text_response(message: str, context: str, chat_history: list):
     client = get_openai_client()
-    
+        
     system_message = """
     You are a makeup artist and beauty advisor named Aiysha. You apply cosmetics on clients to enhance features, create looks and styles according to the latest trends in beauty and fashion. 
     You offer advice about skincare routines, know how to work with different textures of skin tone, and are able to use both traditional methods and new techniques for applying products. 
@@ -332,5 +332,5 @@ def process_audio():
         logger.error(f"Unexpected error in processing audio: {str(e)}")
         return jsonify({"error": "An unexpected error occurred"}), 500
 
-# if __name__ == "__main__":
-#     app.run(debug=True, host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
+if __name__ == "__main__":
+    app.run(debug=True, host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
