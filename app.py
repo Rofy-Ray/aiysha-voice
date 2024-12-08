@@ -177,9 +177,21 @@ def preprocess_audio(file):
     """Convert audio to mono if needed and return temporary file path."""
     try:
         with NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
-            sound = AudioSegment.from_file(file)
+            try:
+                sound = AudioSegment.from_file(file)
+            except Exception as e:
+                if hasattr(file, 'name'):
+                    file_extension = os.path.splitext(file.name)[1].lower()
+                    if file_extension in ['.webm']:
+                        sound = AudioSegment.from_file(file, format='webm')
+                    else:
+                        raise
+                else:
+                    raise
+            
             if sound.channels != 1:
                 sound = sound.set_channels(1)
+            
             sound.export(temp_file.name, format="wav")
             return temp_file.name
     except Exception as e:
@@ -268,13 +280,27 @@ def get_text_response(message: str, context: str, chat_history: list):
 @app.route('/aiyshavoice', methods=['POST'])
 def process_audio():
     try:
-        if 'file' not in request.files:
-            return jsonify({"error": "No file part in the request"}), 400
+        if 'file' in request.files:
+            file = request.files['file']
+            
+            if file.filename == '':
+                return jsonify({"error": "No selected file"}), 400
+            
+            processed_audio_path = preprocess_audio(file)
         
-        file = request.files['file']
+        elif request.is_json and request.json and 'blob' in request.json:
+            blob_data = request.json['blob']
+            
+            if not isinstance(blob_data, dict) or 'type' not in blob_data or 'size' not in blob_data:
+                return jsonify({"error": "Invalid blob format"}), 400
+            
+            blob_file = io.BytesIO(request.data)
+            blob_file.name = 'audio_blob.webm'
+            
+            processed_audio_path = preprocess_audio(blob_file)
         
-        if file.filename == '':
-            return jsonify({"error": "No selected file"}), 400
+        else:
+            return jsonify({"error": "No audio data received"}), 400
         
         conversation_id = request.form.get('conversation_id')
         is_new_conversation = False
@@ -283,9 +309,7 @@ def process_audio():
             conversation_id = generate_conversation_id()
             is_new_conversation = True
             logger.info(f"New conversation started with ID: {conversation_id}")
-        
-        processed_audio_path = preprocess_audio(file)
-        
+                
         with open(processed_audio_path, 'rb') as audio_file:
             audio_bytes = audio_file.read()
         user_audio_url = upload_audio_to_gcs(audio_bytes)
